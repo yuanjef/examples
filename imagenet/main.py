@@ -51,6 +51,8 @@ parser.add_argument('--wd', '--weight-decay', default=1e-4, type=float,
                     dest='weight_decay')
 parser.add_argument('-p', '--print-freq', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
+parser.add_argument('--epochs-between-evals', default=20, type=int,
+                    metavar='N', help='number of epoch between evaluations (default: 20)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
@@ -227,6 +229,8 @@ def main_worker(gpu, ngpus_per_node, args):
         validate(val_loader, model, criterion, args)
         return
 
+    train_begin = time.time()
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -235,15 +239,19 @@ def main_worker(gpu, ngpus_per_node, args):
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, args)
 
+        # should eval
+        should_eval = epoch % args.epochs-between-evals == 0 or epoch == args.epochs - 1
+        
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        if should_eval:
+            acc1 = validate(val_loader, model, criterion, args)
 
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank % ngpus_per_node == 0):
+        if should_eval and (not args.multiprocessing_distributed or (args.multiprocessing_distributed
+                                                                     and args.rank % ngpus_per_node == 0)):
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
@@ -252,6 +260,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
 
+        print("Epoch: [%d]\tElapsed time: [%d]" % (epoch, time.time() - train_begin))
 
 def train(train_loader, model, criterion, optimizer, epoch, args):
     batch_time = AverageMeter()
@@ -263,6 +272,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     # switch to train mode
     model.train()
 
+    begin = time.time()
     end = time.time()
     for i, (input, target) in enumerate(train_loader):
         # measure data loading time
@@ -276,11 +286,16 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         output = model(input)
         loss = criterion(output, target)
 
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), input.size(0))
-        top1.update(acc1[0], input.size(0))
-        top5.update(acc5[0], input.size(0))
+
+        # should print metrics
+        should_print_metrics = i % args.print_freq == 0
+
+        # measure accuracy and record loss
+        if should_print_metrics:
+            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            top1.update(acc1[0], input.size(0))
+            top5.update(acc5[0], input.size(0))
 
         # compute gradient and do SGD step
         optimizer.zero_grad()
@@ -291,14 +306,17 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if i % args.print_freq == 0:
+        elapsed_time = time.time() - begin
+
+        if should_print_metrics:
             print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                  'Elapsed time {elapsed_time:.3f}\t'
+                  'Batch time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                   'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                   'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                   epoch, i, len(train_loader), batch_time=batch_time,
+                      epoch, i, len(train_loader), elapsed_time=elapsed_time, batch_time=batch_time,
                    data_time=data_time, loss=losses, top1=top1, top5=top5))
 
 
@@ -312,6 +330,7 @@ def validate(val_loader, model, criterion, args):
     model.eval()
 
     with torch.no_grad():
+        begin = time.time()
         end = time.time()
         for i, (input, target) in enumerate(val_loader):
             if args.gpu is not None:
@@ -332,13 +351,16 @@ def validate(val_loader, model, criterion, args):
             batch_time.update(time.time() - end)
             end = time.time()
 
+            elapsed_time = time.time() - begin
+
             if i % args.print_freq == 0:
                 print('Test: [{0}/{1}]\t'
+                      'Elapsed time {elapsed_time:.3f}\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.3f} ({top1.avg:.3f})\t'
                       'Acc@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                       i, len(val_loader), batch_time=batch_time, loss=losses,
+                       i, len(val_loader), elapsed_time=elapsed_time, batch_time=batch_time, loss=losses,
                        top1=top1, top5=top5))
 
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
